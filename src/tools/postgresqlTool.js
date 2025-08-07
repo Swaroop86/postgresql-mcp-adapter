@@ -1,5 +1,6 @@
-// src/tools/postgresqlTool.js - Fixed version with proper file creation
+// src/tools/postgresqlTool.js - Fixed version with proper project path handling
 import path from 'path';
+import fs from 'fs';
 
 export class PostgreSQLTool {
   constructor(mcpService, fileService, logger) {
@@ -83,6 +84,17 @@ export class PostgreSQLTool {
               generateTests: {
                 type: 'boolean',
                 default: false
+              },
+              mergeStrategy: {
+                type: 'string',
+                enum: ['smart', 'append', 'replace'],
+                default: 'smart',
+                description: 'How to handle existing files: smart (intelligent merge), append (add to end), replace (overwrite)'
+              },
+              removeProjectNameFromPath: {
+                type: 'boolean',
+                default: true,
+                description: 'Remove project name from package paths (e.g., com.example.test_service.entity -> com.example.entity)'
               }
             }
           },
@@ -106,9 +118,84 @@ export class PostgreSQLTool {
       applyToProject = true 
     } = args;
 
+    // IMPORTANT: Resolve the absolute path for the project
+    let resolvedProjectPath;
+    
+    // When Cursor runs the adapter via stdio, it should run it from the project directory
+    // The process.cwd() should be the project directory, not the adapter directory
+    const currentDir = process.cwd();
+    
+    // Check environment variables that Cursor might set
+    const cursorProjectPath = process.env.CURSOR_PROJECT_PATH || 
+                             process.env.PROJECT_PATH || 
+                             process.env.PWD;
+    
+    this.logger.info(`Current directory: ${currentDir}`);
+    this.logger.info(`Environment PWD: ${process.env.PWD}`);
+    this.logger.info(`Process argv: ${process.argv.join(' ')}`);
+    
+    // If projectPath is absolute, use it directly
+    if (path.isAbsolute(projectPath)) {
+      resolvedProjectPath = projectPath;
+    } else if (cursorProjectPath && cursorProjectPath !== currentDir) {
+      // If we have a project path from environment, use it
+      resolvedProjectPath = projectPath === '.' ? cursorProjectPath : path.resolve(cursorProjectPath, projectPath);
+    } else {
+      // Try to detect the project directory
+      const possibleProjectFiles = ['pom.xml', 'build.gradle', 'package.json', 'src/main/java'];
+      
+      // First, check if current directory is a project
+      let isProject = false;
+      for (const marker of possibleProjectFiles) {
+        if (fs.existsSync(path.join(currentDir, marker))) {
+          isProject = true;
+          break;
+        }
+      }
+      
+      if (isProject) {
+        // Current directory is the project
+        resolvedProjectPath = currentDir;
+      } else {
+        // Search parent directories for project markers
+        let searchDir = currentDir;
+        let foundProjectDir = null;
+        
+        // Go up to 5 levels to find project root
+        for (let i = 0; i < 5; i++) {
+          const parentDir = path.dirname(searchDir);
+          if (parentDir === searchDir) break; // Reached root
+          
+          for (const marker of possibleProjectFiles) {
+            if (fs.existsSync(path.join(parentDir, marker))) {
+              foundProjectDir = parentDir;
+              break;
+            }
+          }
+          
+          if (foundProjectDir) break;
+          searchDir = parentDir;
+        }
+        
+        resolvedProjectPath = foundProjectDir || currentDir;
+      }
+      
+      // If projectPath is not '.', resolve it relative to the found project root
+      if (projectPath !== '.') {
+        resolvedProjectPath = path.resolve(resolvedProjectPath, projectPath);
+      }
+    }
+
+    // Update the file service with the correct project root
+    this.fileService.setProjectRoot(resolvedProjectPath);
+    this.fileService.setRemoveProjectNameFromPath(preferences.removeProjectNameFromPath !== false);
+
     this.logger.info('=== PostgreSQL Integration Tool ===');
     this.logger.info(`Description: ${description}`);
     this.logger.info(`Tables: ${schema.tables.map(t => t.name).join(', ')}`);
+    this.logger.info(`Project Path (provided): ${projectPath}`);
+    this.logger.info(`Project Path (resolved): ${resolvedProjectPath}`);
+    this.logger.info(`Current Working Directory: ${process.cwd()}`);
     this.logger.info(`Apply to Project: ${applyToProject}`);
 
     try {
@@ -116,7 +203,7 @@ export class PostgreSQLTool {
       this.logger.info('\n📋 Phase 1: Creating integration plan...');
       
       const planResponse = await this.mcpService.createPlan({
-        projectPath,
+        projectPath: resolvedProjectPath,
         description,
         preferences
       });
@@ -155,6 +242,7 @@ export class PostgreSQLTool {
       
       if (applyToProject && executionResponse.generatedFiles) {
         this.logger.info('\n📁 Phase 3: Applying files to project...');
+        this.logger.info(`   Target directory: ${resolvedProjectPath}`);
         
         try {
           const result = await this.fileService.applyGeneratedFiles(
@@ -194,7 +282,8 @@ export class PostgreSQLTool {
             executionResponse, 
             applyToProject, 
             filesApplied,
-            appliedFiles
+            appliedFiles,
+            resolvedProjectPath
           )
         }]
       };
@@ -211,7 +300,7 @@ export class PostgreSQLTool {
     }
   }
 
-  formatCombinedResponse(planResponse, executionResponse, applyToProject, filesApplied, appliedFiles = []) {
+  formatCombinedResponse(planResponse, executionResponse, applyToProject, filesApplied, appliedFiles = [], projectPath) {
     const summary = executionResponse.summary;
     const validation = executionResponse.validation || {};
 
@@ -221,6 +310,7 @@ export class PostgreSQLTool {
 - **Plan ID:** \`${planResponse.planId}\`
 - **Framework:** ${planResponse.projectAnalysis?.detectedFramework || 'Spring Boot'}
 - **Base Package:** \`${planResponse.projectAnalysis?.basePackage || 'com.example'}\`
+- **Project Path:** \`${projectPath}\`
 
 ## 📊 Execution Summary
 - **Execution ID:** \`${executionResponse.executionId}\`

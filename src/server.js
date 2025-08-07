@@ -25,6 +25,10 @@ export class PostgreSQLMCPServer {
     this.config = config;
     this.logger = new Logger(config.logLevel);
     
+    // Store the initial working directory
+    this.initialWorkingDirectory = process.cwd();
+    this.logger.info(`Initial working directory: ${this.initialWorkingDirectory}`);
+    
     // Initialize services
     this.mcpService = new McpService(config, this.logger);
     this.fileService = new FileService(config, this.logger);
@@ -70,6 +74,12 @@ export class PostgreSQLMCPServer {
       try {
         this.logger.info(`Executing tool: ${name}`);
         this.logger.debug(`Tool arguments:`, JSON.stringify(args, null, 2));
+        
+        // If no projectPath is specified, use the initial working directory
+        if (!args.projectPath || args.projectPath === '.') {
+          args.projectPath = this.initialWorkingDirectory;
+          this.logger.info(`Using initial working directory as project path: ${args.projectPath}`);
+        }
 
         switch (name) {
           case 'generate_postgresql_integration':
@@ -111,6 +121,13 @@ export class PostgreSQLMCPServer {
 
   async run() {
     try {
+      // Log startup information
+      this.logger.info('Starting PostgreSQL MCP Adapter...');
+      this.logger.info(`Node version: ${process.version}`);
+      this.logger.info(`Platform: ${process.platform}`);
+      this.logger.info(`Working directory: ${process.cwd()}`);
+      this.logger.info(`Script location: ${import.meta.url}`);
+      
       // Test connection to Spring Boot server
       await this.mcpService.testConnection();
       this.logger.info('✅ Connection to Spring Boot server verified');
