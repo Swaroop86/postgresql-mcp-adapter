@@ -1,0 +1,7 @@
+{
+  "mcpServerUrl": "http://localhost:8080/mcp",
+  "timeout": 30000,
+  "autoBackup": true,
+  "backupDir": ".mcp-backups",
+  "logLevel": "info"
+}
