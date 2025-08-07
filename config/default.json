@@ -3,5 +3,5 @@
   "timeout": 30000,
   "autoBackup": true,
   "backupDir": ".mcp-backups",
-  "logLevel": "info"
+  "logLevel": "debug"
 }

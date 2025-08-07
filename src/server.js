@@ -1,3 +1,10 @@
+#!/usr/bin/env node
+
+/**
+ * PostgreSQL MCP Adapter - Main Server
+ * Updated to use combined tool for stateless operation
+ */
+
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -7,8 +14,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { PlanTool } from './tools/planTool.js';
-import { ExecuteTool } from './tools/executeTool.js';
+import { PostgreSQLTool } from './tools/postgresqlTool.js';
 import { StatusTool } from './tools/statusTool.js';
 import { McpService } from './services/mcpService.js';
 import { FileService } from './services/fileService.js';
@@ -23,10 +29,9 @@ export class PostgreSQLMCPServer {
     this.mcpService = new McpService(config, this.logger);
     this.fileService = new FileService(config, this.logger);
     
-    // Initialize tools
+    // Initialize tools - using combined tool instead of separate plan/execute
     this.tools = {
-      plan: new PlanTool(this.mcpService, this.logger),
-      execute: new ExecuteTool(this.mcpService, this.fileService, this.logger),
+      postgresql: new PostgreSQLTool(this.mcpService, this.fileService, this.logger),
       status: new StatusTool(this.fileService, this.logger)
     };
 
@@ -52,8 +57,7 @@ export class PostgreSQLMCPServer {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
         tools: [
-          this.tools.plan.getDefinition(),
-          this.tools.execute.getDefinition(),
+          this.tools.postgresql.getDefinition(),
           this.tools.status.getDefinition()
         ]
       };
@@ -65,13 +69,11 @@ export class PostgreSQLMCPServer {
 
       try {
         this.logger.info(`Executing tool: ${name}`);
+        this.logger.debug(`Tool arguments:`, JSON.stringify(args, null, 2));
 
         switch (name) {
-          case 'create_postgresql_integration_plan':
-            return await this.tools.plan.execute(args);
-          
-          case 'execute_postgresql_integration':
-            return await this.tools.execute.execute(args);
+          case 'generate_postgresql_integration':
+            return await this.tools.postgresql.execute(args);
           
           case 'get_postgresql_integration_status':
             return await this.tools.status.execute(args);
@@ -117,6 +119,9 @@ export class PostgreSQLMCPServer {
       await this.server.connect(transport);
       
       this.logger.info('🚀 PostgreSQL Integration MCP Server running on stdio');
+      this.logger.info('Available tools:');
+      this.logger.info('  - generate_postgresql_integration: Complete PostgreSQL integration');
+      this.logger.info('  - get_postgresql_integration_status: Check integration status');
     } catch (error) {
       this.logger.error('Failed to start server:', error);
       throw error;
