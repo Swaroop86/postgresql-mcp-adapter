@@ -1,12 +1,12 @@
-// src/tools/postgresqlTool.js - Fixed version with proper project path handling
 import path from 'path';
 import fs from 'fs';
 
 export class PostgreSQLTool {
-  constructor(mcpService, fileService, logger) {
+  constructor(mcpService, fileService, logger, defaultProjectDirectory = null) {
     this.mcpService = mcpService;
     this.fileService = fileService;
     this.logger = logger;
+    this.defaultProjectDirectory = defaultProjectDirectory || process.cwd();
   }
 
   getDefinition() {
@@ -18,7 +18,7 @@ export class PostgreSQLTool {
         properties: {
           projectPath: {
             type: 'string',
-            description: 'Path to the project directory',
+            description: 'Path to the project directory (defaults to current Cursor project)',
             default: '.'
           },
           description: {
@@ -89,12 +89,12 @@ export class PostgreSQLTool {
                 type: 'string',
                 enum: ['smart', 'append', 'replace'],
                 default: 'smart',
-                description: 'How to handle existing files: smart (intelligent merge), append (add to end), replace (overwrite)'
+                description: 'How to handle existing files'
               },
               removeProjectNameFromPath: {
                 type: 'boolean',
                 default: true,
-                description: 'Remove project name from package paths (e.g., com.example.test_service.entity -> com.example.entity)'
+                description: 'Remove project name from package paths'
               }
             }
           },
@@ -111,97 +111,82 @@ export class PostgreSQLTool {
 
   async execute(args) {
     const { 
-      projectPath = '.', 
+      projectPath, 
       description, 
       schema, 
       preferences = {}, 
       applyToProject = true 
     } = args;
 
-    // IMPORTANT: Resolve the absolute path for the project
-    let resolvedProjectPath;
+    // CRITICAL: Use the project path that was already resolved in server.js
+    // The projectPath should already be set to the Cursor working directory
+    const resolvedProjectPath = projectPath || this.defaultProjectDirectory;
     
-    // When Cursor runs the adapter via stdio, it should run it from the project directory
-    // The process.cwd() should be the project directory, not the adapter directory
-    const currentDir = process.cwd();
-    
-    // Check environment variables that Cursor might set
-    const cursorProjectPath = process.env.CURSOR_PROJECT_PATH || 
-                             process.env.PROJECT_PATH || 
-                             process.env.PWD;
-    
-    this.logger.info(`Current directory: ${currentDir}`);
-    this.logger.info(`Environment PWD: ${process.env.PWD}`);
-    this.logger.info(`Process argv: ${process.argv.join(' ')}`);
-    
-    // If projectPath is absolute, use it directly
-    if (path.isAbsolute(projectPath)) {
-      resolvedProjectPath = projectPath;
-    } else if (cursorProjectPath && cursorProjectPath !== currentDir) {
-      // If we have a project path from environment, use it
-      resolvedProjectPath = projectPath === '.' ? cursorProjectPath : path.resolve(cursorProjectPath, projectPath);
-    } else {
-      // Try to detect the project directory
-      const possibleProjectFiles = ['pom.xml', 'build.gradle', 'package.json', 'src/main/java'];
+    this.logger.info('=== PostgreSQL Integration Tool Execution ===');
+    this.logger.info(`Description: ${description}`);
+    this.logger.info(`Tables: ${schema.tables.map(t => t.name).join(', ')}`);
+    this.logger.info(`Project Path (received): ${projectPath}`);
+    this.logger.info(`Project Path (resolved): ${resolvedProjectPath}`);
+    this.logger.info(`Default Project Directory: ${this.defaultProjectDirectory}`);
+    this.logger.info(`Apply to Project: ${applyToProject}`);
+
+    // Verify the project path exists and contains a Spring Boot project
+    try {
+      const stats = await fs.promises.stat(resolvedProjectPath);
+      if (!stats.isDirectory()) {
+        throw new Error(`Project path is not a directory: ${resolvedProjectPath}`);
+      }
+
+      // Check for Spring Boot project markers
+      const pomPath = path.join(resolvedProjectPath, 'pom.xml');
+      const gradlePath = path.join(resolvedProjectPath, 'build.gradle');
+      const srcPath = path.join(resolvedProjectPath, 'src', 'main', 'java');
       
-      // First, check if current directory is a project
-      let isProject = false;
-      for (const marker of possibleProjectFiles) {
-        if (fs.existsSync(path.join(currentDir, marker))) {
-          isProject = true;
-          break;
+      let isSpringBootProject = false;
+      let buildFile = null;
+      
+      try {
+        await fs.promises.access(pomPath);
+        buildFile = 'pom.xml';
+        isSpringBootProject = true;
+      } catch {
+        try {
+          await fs.promises.access(gradlePath);
+          buildFile = 'build.gradle';
+          isSpringBootProject = true;
+        } catch {
+          this.logger.warn('No pom.xml or build.gradle found in project directory');
         }
       }
       
-      if (isProject) {
-        // Current directory is the project
-        resolvedProjectPath = currentDir;
+      if (isSpringBootProject) {
+        this.logger.info(`✅ Found Spring Boot project with ${buildFile}`);
       } else {
-        // Search parent directories for project markers
-        let searchDir = currentDir;
-        let foundProjectDir = null;
-        
-        // Go up to 5 levels to find project root
-        for (let i = 0; i < 5; i++) {
-          const parentDir = path.dirname(searchDir);
-          if (parentDir === searchDir) break; // Reached root
-          
-          for (const marker of possibleProjectFiles) {
-            if (fs.existsSync(path.join(parentDir, marker))) {
-              foundProjectDir = parentDir;
-              break;
-            }
-          }
-          
-          if (foundProjectDir) break;
-          searchDir = parentDir;
-        }
-        
-        resolvedProjectPath = foundProjectDir || currentDir;
+        this.logger.warn('⚠️ Spring Boot project markers not found, continuing anyway...');
       }
       
-      // If projectPath is not '.', resolve it relative to the found project root
-      if (projectPath !== '.') {
-        resolvedProjectPath = path.resolve(resolvedProjectPath, projectPath);
+      // Check if src/main/java exists
+      try {
+        await fs.promises.access(srcPath);
+        this.logger.info('✅ Found src/main/java directory');
+      } catch {
+        this.logger.warn('⚠️ src/main/java directory not found - it will be created');
       }
+      
+    } catch (error) {
+      this.logger.error(`Project path verification failed: ${error.message}`);
+      throw new Error(`Invalid project path: ${resolvedProjectPath} - ${error.message}`);
     }
 
     // Update the file service with the correct project root
     this.fileService.setProjectRoot(resolvedProjectPath);
     this.fileService.setRemoveProjectNameFromPath(preferences.removeProjectNameFromPath !== false);
 
-    this.logger.info('=== PostgreSQL Integration Tool ===');
-    this.logger.info(`Description: ${description}`);
-    this.logger.info(`Tables: ${schema.tables.map(t => t.name).join(', ')}`);
-    this.logger.info(`Project Path (provided): ${projectPath}`);
-    this.logger.info(`Project Path (resolved): ${resolvedProjectPath}`);
-    this.logger.info(`Current Working Directory: ${process.cwd()}`);
-    this.logger.info(`Apply to Project: ${applyToProject}`);
-
     try {
       // Phase 1: Create Plan
       this.logger.info('\n📋 Phase 1: Creating integration plan...');
       
+      // Send the resolved project path to the MCP server
       const planResponse = await this.mcpService.createPlan({
         projectPath: resolvedProjectPath,
         description,
@@ -239,6 +224,7 @@ export class PostgreSQLTool {
       // Phase 3: Apply files if requested
       let filesApplied = 0;
       let appliedFiles = [];
+      let applicationErrors = [];
       
       if (applyToProject && executionResponse.generatedFiles) {
         this.logger.info('\n📁 Phase 3: Applying files to project...');
@@ -252,6 +238,7 @@ export class PostgreSQLTool {
           if (typeof result === 'object' && result.count !== undefined) {
             filesApplied = result.count;
             appliedFiles = result.files || [];
+            applicationErrors = result.errors || [];
           } else {
             filesApplied = result;
           }
@@ -261,13 +248,20 @@ export class PostgreSQLTool {
           if (appliedFiles.length > 0) {
             this.logger.info('Applied files:');
             appliedFiles.forEach(file => {
-              this.logger.info(`   - ${file}`);
+              this.logger.info(`   ✅ ${file}`);
+            });
+          }
+          
+          if (applicationErrors.length > 0) {
+            this.logger.warn('Some files could not be applied:');
+            applicationErrors.forEach(error => {
+              this.logger.warn(`   ⚠️ ${error}`);
             });
           }
         } catch (error) {
           this.logger.error('Failed to apply files:', error);
           this.logger.error('Error details:', error.stack);
-          // Don't throw - continue with the response
+          applicationErrors.push(error.message);
         }
       } else if (!applyToProject) {
         this.logger.info('\n📁 Phase 3: Skipping file application (applyToProject = false)');
@@ -283,24 +277,29 @@ export class PostgreSQLTool {
             applyToProject, 
             filesApplied,
             appliedFiles,
-            resolvedProjectPath
+            resolvedProjectPath,
+            applicationErrors
           )
         }]
       };
 
       this.logger.info('\n✅ Tool execution completed successfully');
-      this.logger.debug('Response:', JSON.stringify(response, null, 2));
-
       return response;
 
     } catch (error) {
       this.logger.error('Integration failed:', error);
       this.logger.error('Error stack:', error.stack);
-      throw error;
+      
+      return {
+        content: [{
+          type: 'text',
+          text: this.formatErrorResponse(error, description, resolvedProjectPath)
+        }]
+      };
     }
   }
 
-  formatCombinedResponse(planResponse, executionResponse, applyToProject, filesApplied, appliedFiles = [], projectPath) {
+  formatCombinedResponse(planResponse, executionResponse, applyToProject, filesApplied, appliedFiles = [], projectPath, errors = []) {
     const summary = executionResponse.summary;
     const validation = executionResponse.validation || {};
 
@@ -319,26 +318,37 @@ export class PostgreSQLTool {
 - **Files Modified:** ${summary.filesModified}
 - **Dependencies Added:** ${summary.dependenciesAdded}
 - **Total Lines of Code:** ${summary.totalLinesOfCode}
-${applyToProject ? `- **Files Applied to Project:** ${filesApplied}` : '- **Files Applied:** Skipped (applyToProject = false)'}
+${applyToProject ? `- **Files Applied to Project:** ${filesApplied}/${summary.filesGenerated}` : '- **Files Applied:** Skipped (applyToProject = false)'}
 
 ## 📁 Generated Components
 
 ${executionResponse.generatedFiles?.map(category => 
   `### ${category.category}
-${category.files?.map(file => 
-  `- **${path.basename(file.path)}** (${file.size || 0} lines)
+${category.files?.map(file => {
+  const applied = appliedFiles.some(f => f.includes(path.basename(file.path)));
+  const status = applied ? '✅' : (applyToProject ? '⚠️' : '📄');
+  return `- ${status} **${path.basename(file.path)}** (${file.size || 0} lines)
   - 📂 Path: \`${file.path}\`
-  - 🔧 Action: ${file.action}`
-).join('\n')}`
+  - 🔧 Action: ${file.action}`;
+}).join('\n')}`
 ).join('\n\n') || 'No files information available'}
 
 `;
 
     // Add applied files section if any
     if (appliedFiles.length > 0) {
-      response += `## ✅ Applied Files\n\n`;
+      response += `## ✅ Successfully Applied Files\n\n`;
       appliedFiles.forEach(file => {
-        response += `- ${file}\n`;
+        response += `- ✅ ${file}\n`;
+      });
+      response += '\n';
+    }
+
+    // Add errors section if any
+    if (errors.length > 0) {
+      response += `## ⚠️ File Application Issues\n\n`;
+      errors.forEach(error => {
+        response += `- ❌ ${error}\n`;
       });
       response += '\n';
     }
@@ -381,13 +391,56 @@ curl http://localhost:8080/api/${executionResponse.generatedFiles?.[0]?.files?.[
 \`\`\`
 
 ---
-${applyToProject ? 
-  (filesApplied > 0 ? 
-    '✅ **All files have been applied to your project!**' : 
-    '⚠️ **Files were generated but could not be applied. Check the file paths and permissions.**'
-  ) : 
-  '📋 **Files generated but not applied. Set applyToProject: true to auto-apply.**'}`;
+`;
+
+    if (applyToProject) {
+      if (filesApplied === summary.filesGenerated) {
+        response += '✅ **All files have been successfully applied to your project!**';
+      } else if (filesApplied > 0) {
+        response += `⚠️ **${filesApplied} of ${summary.filesGenerated} files were applied. Check the errors above for details.**`;
+      } else {
+        response += '❌ **Files were generated but could not be applied. Check the file paths and permissions.**';
+      }
+    } else {
+      response += '📋 **Files generated but not applied. Set applyToProject: true to auto-apply.**';
+    }
 
     return response;
+  }
+
+  formatErrorResponse(error, description, projectPath) {
+    return `# ❌ PostgreSQL Integration Failed
+
+## 🚨 Error Details
+- **Description:** ${description}
+- **Project Path:** \`${projectPath}\`
+- **Error:** ${error.message}
+
+## 🔧 Troubleshooting Steps
+
+1. **Verify Project Directory**
+   - Ensure Cursor is opened in your Spring Boot project root
+   - Check that the directory contains pom.xml or build.gradle
+   - Current detected path: \`${projectPath}\`
+
+2. **Check MCP Server Connection**
+   - Ensure your Spring Boot MCP server is running on port 8080
+   - Test: \`curl http://localhost:8080/mcp/health\`
+
+3. **Review Project Structure**
+   - Verify src/main/java directory exists
+   - Check write permissions on the project directory
+
+4. **Check Logs**
+   - Review the MCP adapter logs for detailed error information
+   - Check the Spring Boot server logs
+
+## 🔄 Try Again
+1. Ensure Cursor is opened in the correct project directory
+2. Restart the MCP adapter
+3. Try the integration again
+
+---
+💡 **Need help?** Check the logs for more details about what went wrong.`;
   }
 }

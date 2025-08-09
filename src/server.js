@@ -2,7 +2,7 @@
 
 /**
  * PostgreSQL MCP Adapter - Main Server
- * Updated to use combined tool for stateless operation
+ * Fixed to properly capture and use Cursor's working directory
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -25,17 +25,31 @@ export class PostgreSQLMCPServer {
     this.config = config;
     this.logger = new Logger(config.logLevel);
     
-    // Store the initial working directory
-    this.initialWorkingDirectory = process.cwd();
-    this.logger.info(`Initial working directory: ${this.initialWorkingDirectory}`);
+    // CRITICAL: Capture the initial working directory when server starts
+    // This is the directory where Cursor invoked the MCP adapter
+    this.cursorProjectDirectory = process.cwd();
     
-    // Initialize services
+    this.logger.info('=== MCP Server Initialization ===');
+    this.logger.info(`Initial working directory (Cursor project): ${this.cursorProjectDirectory}`);
+    this.logger.info(`Process arguments: ${process.argv.join(' ')}`);
+    this.logger.info(`Environment PWD: ${process.env.PWD}`);
+    this.logger.info(`Platform: ${process.platform}`);
+    
+    // Initialize services with the correct project directory
     this.mcpService = new McpService(config, this.logger);
     this.fileService = new FileService(config, this.logger);
     
-    // Initialize tools - using combined tool instead of separate plan/execute
+    // Set the project root to Cursor's working directory
+    this.fileService.setProjectRoot(this.cursorProjectDirectory);
+    
+    // Initialize tools with proper context
     this.tools = {
-      postgresql: new PostgreSQLTool(this.mcpService, this.fileService, this.logger),
+      postgresql: new PostgreSQLTool(
+        this.mcpService, 
+        this.fileService, 
+        this.logger,
+        this.cursorProjectDirectory  // Pass the directory to the tool
+      ),
       status: new StatusTool(this.fileService, this.logger)
     };
 
@@ -75,10 +89,16 @@ export class PostgreSQLMCPServer {
         this.logger.info(`Executing tool: ${name}`);
         this.logger.debug(`Tool arguments:`, JSON.stringify(args, null, 2));
         
-        // If no projectPath is specified, use the initial working directory
-        if (!args.projectPath || args.projectPath === '.') {
-          args.projectPath = this.initialWorkingDirectory;
-          this.logger.info(`Using initial working directory as project path: ${args.projectPath}`);
+        // IMPORTANT: Override projectPath with Cursor's working directory if not specified
+        // or if it's just '.' (relative path)
+        if (!args.projectPath || args.projectPath === '.' || args.projectPath === '/') {
+          args.projectPath = this.cursorProjectDirectory;
+          this.logger.info(`Using Cursor's working directory as project path: ${args.projectPath}`);
+        } else if (!args.projectPath.startsWith('/') && !args.projectPath.startsWith('~')) {
+          // If it's a relative path, resolve it relative to Cursor's working directory
+          const path = await import('path');
+          args.projectPath = path.resolve(this.cursorProjectDirectory, args.projectPath);
+          this.logger.info(`Resolved relative path to: ${args.projectPath}`);
         }
 
         switch (name) {
@@ -121,12 +141,37 @@ export class PostgreSQLMCPServer {
 
   async run() {
     try {
-      // Log startup information
+      // Log detailed startup information
       this.logger.info('Starting PostgreSQL MCP Adapter...');
       this.logger.info(`Node version: ${process.version}`);
       this.logger.info(`Platform: ${process.platform}`);
-      this.logger.info(`Working directory: ${process.cwd()}`);
+      this.logger.info(`Cursor Project Directory: ${this.cursorProjectDirectory}`);
       this.logger.info(`Script location: ${import.meta.url}`);
+      
+      // Verify the project directory is valid
+      const fs = await import('fs');
+      const path = await import('path');
+      
+      try {
+        const stats = await fs.promises.stat(this.cursorProjectDirectory);
+        if (stats.isDirectory()) {
+          this.logger.info('✅ Project directory exists and is accessible');
+          
+          // Check for project markers
+          const projectMarkers = ['pom.xml', 'build.gradle', 'package.json', 'src'];
+          for (const marker of projectMarkers) {
+            const markerPath = path.join(this.cursorProjectDirectory, marker);
+            try {
+              await fs.promises.access(markerPath);
+              this.logger.info(`✅ Found project marker: ${marker}`);
+            } catch {
+              // Marker not found, continue checking
+            }
+          }
+        }
+      } catch (error) {
+        this.logger.warn(`⚠️ Could not verify project directory: ${error.message}`);
+      }
       
       // Test connection to Spring Boot server
       await this.mcpService.testConnection();
@@ -136,6 +181,7 @@ export class PostgreSQLMCPServer {
       await this.server.connect(transport);
       
       this.logger.info('🚀 PostgreSQL Integration MCP Server running on stdio');
+      this.logger.info('📁 Working with project at: ' + this.cursorProjectDirectory);
       this.logger.info('Available tools:');
       this.logger.info('  - generate_postgresql_integration: Complete PostgreSQL integration');
       this.logger.info('  - get_postgresql_integration_status: Check integration status');
